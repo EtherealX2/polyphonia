@@ -1,0 +1,10 @@
+host-extract*/
+lx-test-data/
+dist/polyphonia/
+*-out.txt
+node_modules/
+*-test.cjs
+*-test.mjs
+probe-*.cjs
+dbg-*.cjs
+asar-extract.cjs
