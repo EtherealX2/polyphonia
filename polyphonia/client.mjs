@@ -489,13 +489,16 @@ export default async function activate(folium) {
             query: '', searchItems: [], searchOffset: 0, searchHasMore: false, searching: false,
             searchSrcFilter: [], searchSingerFilter: '',
             importText: '', importing: false,
-            myLists: [], myMode: false,
+            myLists: [], myMerge: false, mySel: [], merging: false, renamingKey: '', renameText: '', colMyKey: null,
+            creatingList: false, newListName: '',
             scripts: [], scriptsLoading: false, editor: null,
         });
         state.loading = false; state.listLoading = false; state.colLoading = false;
         state.feedLoading = false; state.searching = false; state.importing = false; state.scriptsLoading = false;
         if (state.editor) state.editor.saving = false;
         if (state.view === 'settings') state.view = 'sources';
+        listsGetter = () => state.myLists;
+        listsSync = (l) => { state.myLists = l; render(); };
 
         const root = document.createElement('div');
         root.className = 'lx-root';
@@ -564,9 +567,11 @@ export default async function activate(folium) {
 .lx-colsub{font-size:12px;opacity:.55;margin-top:3px}
 .lx-import{display:flex;gap:8px;padding:0 0 12px;align-items:center}
 .lx-import .lx-input{font-size:13px;padding:6px 12px}
+.lx-reninput{flex:none;width:100%;font-size:13px;padding:4px 10px;margin:0 0 4px}
 .lx-hint{font-size:12px;opacity:.5;white-space:nowrap}
 .lx-myitem{border-bottom:1px solid color-mix(in srgb,var(--lx-text) 7%,transparent)}
 .lx-myrow{display:flex;align-items:center;gap:10px;padding:8px 12px;cursor:pointer}
+.lx-check{flex:none;width:16px;height:16px;margin:0 2px;cursor:pointer}
 .lx-myrow:hover{background:color-mix(in srgb,var(--lx-primary) 8%,transparent)}
 .lx-mycover{width:44px;height:44px;border-radius:6px;object-fit:cover;flex-shrink:0;background:color-mix(in srgb,var(--lx-text) 10%,transparent)}
 .lx-note{font-size:12px;opacity:.55;padding:0 0 10px;line-height:1.5}
@@ -643,7 +648,7 @@ export default async function activate(folium) {
             toast(`已播放全部（${songs.length} 首）`);
         };
 
-        const songRow = (song, idx) => {
+        const songRow = (song, idx, onRemove) => {
             const row = el('div', 'lx-row');
             row.appendChild(el('span', 'lx-idx', String(idx + 1)));
             if (song.coverUrl) {
@@ -669,16 +674,22 @@ export default async function activate(folium) {
             bAdd.onclick = () => enqueueOne(song.id);
             acts.appendChild(bPlay);
             acts.appendChild(bAdd);
+            if (onRemove) {
+                const bRm = el('button', 'lx-btn sm ghost', '移出');
+                bRm.title = '从本收藏移出';
+                bRm.onclick = () => onRemove(song);
+                acts.appendChild(bRm);
+            }
             row.appendChild(acts);
             return row;
         };
 
-        const songListEl = (songs, loading, error, emptyText) => {
+        const songListEl = (songs, loading, error, emptyText, onRemove) => {
             const list = el('div', 'lx-list');
             if (loading && !songs.length) list.appendChild(el('div', 'lx-msg', '加载中…'));
             else if (error && !songs.length) list.appendChild(el('div', 'lx-msg err', error));
             else if (!songs.length) list.appendChild(el('div', 'lx-msg', emptyText));
-            else songs.forEach((s, i) => list.appendChild(songRow(s, i)));
+            else songs.forEach((s, i) => list.appendChild(songRow(s, i, onRemove)));
             return list;
         };
 
@@ -734,7 +745,7 @@ export default async function activate(folium) {
             render();
             try {
                 const r = await folium.rpc.call('discoverLists', { source: src, kind, cat, page: state.listPage });
-                if (state.src !== src || discoverKind() !== kind || state.myMode) return;
+                if (state.src !== src || discoverKind() !== kind) return;
                 if (r.unsupported) { state.unsupported = r.unsupported; state.listHasMore = false; }
                 else {
                     state.lists = reset ? (r.items || []) : state.lists.concat(r.items || []);
@@ -763,14 +774,38 @@ export default async function activate(folium) {
         const openCol = async (item, kind, srcArg) => {
             const src = srcArg || state.src;
             state.colSrc = src;
+            state.colMyKey = item.key || null;
             state.col = { ...item, kind };
             state.colSongs = []; state.colTotal = 0; state.colLoading = true; state.error = '';
             render();
+            if (Array.isArray(item.songs)) {
+                state.colSongs = item.songs.map(s => platformToProviderSong(s.source, s));
+                state.colTotal = state.colSongs.length;
+                state.colLoading = false;
+                if (!state.colSongs.length) state.error = '该列表暂无歌曲';
+                render();
+                return;
+            }
             try {
                 const r = await folium.rpc.call('discoverSongs', { source: src, kind, id: item.id });
                 if (!state.col || state.col.id !== item.id) return;
                 state.colSongs = (r.songs || []).map(s => platformToProviderSong(src, s));
                 state.colTotal = r.total || state.colSongs.length;
+                const myEntry = state.colMyKey ? state.myLists.find(x => x.key === state.colMyKey) : null;
+                const rem = new Set((myEntry && myEntry.removed) || []);
+                if (rem.size) {
+                    state.colSongs = state.colSongs.filter(s => !rem.has(s.id));
+                    state.colTotal = state.colSongs.length;
+                }
+                const add = (myEntry && myEntry.added) || [];
+                if (add.length) {
+                    const have = new Set(state.colSongs.map(s => s.id));
+                    for (const s of add) {
+                        const p = platformToProviderSong(s.source, s);
+                        if (!have.has(p.id)) { have.add(p.id); state.colSongs.push(p); }
+                    }
+                    state.colTotal = state.colSongs.length;
+                }
                 if (r.name) state.col.name = r.name;
                 if (r.picUrl) state.col.picUrl = r.picUrl;
                 if (!state.colSongs.length) state.error = '该列表暂无歌曲';
@@ -784,10 +819,18 @@ export default async function activate(folium) {
             const list = el('div', 'lx-list');
             if (state.listLoading && !state.myLists.length) { list.appendChild(el('div', 'lx-msg', '加载中…')); return list; }
             if (state.error && !state.myLists.length) { list.appendChild(el('div', 'lx-msg err', state.error)); return list; }
-            if (!state.myLists.length) { list.appendChild(el('div', 'lx-msg', '还没有收藏：上方粘贴链接导入，或在歌单/专辑详情页点「收藏」')); return list; }
-            for (const item of state.myLists) {
+            if (!state.myLists.length) { list.appendChild(el('div', 'lx-msg', '还没有收藏：上方粘贴链接导入、新建歌单，或在播放页收藏当前歌曲')); return list; }
+            const ordered = state.myLists.slice().sort((a, b) => (a.kind === 'like' ? 0 : 1) - (b.kind === 'like' ? 0 : 1));
+            for (const item of ordered) {
                 const wrap = el('div', 'lx-myitem');
                 const row = el('div', 'lx-myrow');
+                if (state.myMerge) {
+                    const ck = el('input', 'lx-check');
+                    ck.type = 'checkbox';
+                    ck.checked = state.mySel.includes(item.key);
+                    ck.onclick = (e) => { e.stopPropagation(); toggleSel(item.key); };
+                    row.appendChild(ck);
+                }
                 if (item.picUrl) {
                     const img = el('img', 'lx-mycover');
                     img.loading = 'lazy';
@@ -796,9 +839,21 @@ export default async function activate(folium) {
                     row.appendChild(img);
                 } else row.appendChild(el('span', 'lx-mycover'));
                 const meta = el('div', 'lx-meta');
-                meta.appendChild(el('div', 'lx-name', item.name || `${item.source}:${item.id}`));
-                const plat = PLATFORMS[item.source] ? PLATFORMS[item.source].short : item.source;
-                meta.appendChild(el('div', 'lx-artist', `${plat} · ${item.kind === 'album' ? '专辑' : '歌单'}${item.total ? ` · ${item.total} 首` : ''}`));
+                if (state.renamingKey === item.key) {
+                    const inp = el('input', 'lx-input lx-reninput');
+                    inp.value = state.renameText;
+                    inp.oninput = () => { state.renameText = inp.value; };
+                    inp.onkeydown = (e) => {
+                        if (e.key === 'Enter') void commitRename(item);
+                        else if (e.key === 'Escape') { state.renamingKey = ''; render(); }
+                    };
+                    meta.appendChild(inp);
+                } else {
+                    meta.appendChild(el('div', 'lx-name', item.name || `${item.source}:${item.id}`));
+                }
+                const plat = item.kind === 'merged' ? '合并' : item.kind === 'like' ? '喜欢' : item.kind === 'local' ? '本地' : (PLATFORMS[item.source] ? PLATFORMS[item.source].short : item.source);
+                const shownTotal = shownTotalOf(item);
+                meta.appendChild(el('div', 'lx-artist', `${plat} · ${item.kind === 'album' ? '专辑' : '歌单'}${shownTotal ? ` · ${shownTotal} 首` : ''}`));
                 row.appendChild(meta);
                 const acts = el('div', 'lx-acts');
                 const bOpen = el('button', 'lx-btn sm ghost', '进入');
@@ -808,19 +863,143 @@ export default async function activate(folium) {
                     e.stopPropagation();
                     await folium.rpc.call('removeMyList', { key: item.key }).catch(() => {});
                     state.myLists = state.myLists.filter(x => x.key !== item.key);
+                    if (state.renamingKey === item.key) state.renamingKey = '';
+                    if (state.colMyKey === item.key) { state.colMyKey = null; state.col = null; state.colSongs = []; }
                     render();
                     toast('已移除收藏');
                 };
-                acts.appendChild(bOpen);
-                acts.appendChild(bDel);
-                row.appendChild(acts);
-                row.onclick = () => { void openCol(item, item.kind, item.source); };
+                if (!state.myMerge) {
+                    if (state.renamingKey === item.key) {
+                        const bSave = el('button', 'lx-btn sm', '保存');
+                        bSave.onclick = (e) => { e.stopPropagation(); void commitRename(item); };
+                        const bCancel = el('button', 'lx-btn sm ghost', '取消');
+                        bCancel.onclick = (e) => { e.stopPropagation(); state.renamingKey = ''; render(); };
+                        acts.appendChild(bSave);
+                        acts.appendChild(bCancel);
+                    } else {
+                        acts.appendChild(bOpen);
+                        const bExp = el('button', 'lx-btn sm ghost', '导出');
+                        bExp.onclick = (e) => {
+                            e.stopPropagation();
+                            void (async () => {
+                                try {
+                                    const r = await folium.rpc.call('exportMyList', { key: item.key });
+                                    toast(`已导出 ${r.total} 首：${r.file}`);
+                                } catch (err) { toast(`导出失败：${err && err.message}`); }
+                            })();
+                        };
+                        acts.appendChild(bExp);
+                        const bRen = el('button', 'lx-btn sm ghost', '重命名');
+                        bRen.onclick = (e) => { e.stopPropagation(); state.renamingKey = item.key; state.renameText = item.name || ''; render(); };
+                        acts.appendChild(bRen);
+                        acts.appendChild(bDel);
+                    }
+                    row.appendChild(acts);
+                }
+                row.onclick = () => {
+                    if (state.myMerge) { toggleSel(item.key); return; }
+                    if (state.renamingKey === item.key) return;
+                    void openCol(item, item.kind, item.source);
+                };
                 wrap.appendChild(row);
                 list.appendChild(wrap);
             }
             return list;
         };
 
+        const toggleSel = (key) => {
+            state.mySel = state.mySel.includes(key) ? state.mySel.filter(k => k !== key) : state.mySel.concat(key);
+            render();
+        };
+        const commitRename = async (item) => {
+            const name = state.renameText.trim();
+            if (!name) { toast('名称不能为空'); return; }
+            try {
+                const entry = await folium.rpc.call('updateMyList', { key: item.key, name });
+                state.myLists = state.myLists.map(x => x.key === item.key ? entry : x);
+                if (state.colMyKey === item.key && state.col) state.col.name = entry.name;
+                state.renamingKey = '';
+                toast('已重命名');
+            } catch (e) { toast(`重命名失败：${e && e.message}`); }
+            render();
+        };
+        const commitCreateList = async () => {
+            const name = state.newListName.trim();
+            if (!name) { toast('名称不能为空'); return; }
+            try {
+                const entry = await folium.rpc.call('createMyList', { name });
+                state.myLists = [entry].concat(state.myLists.filter(x => x.key !== entry.key));
+                state.creatingList = false; state.newListName = '';
+                toast(`已新建「${entry.name}」`);
+            } catch (e) { toast(`新建失败：${e && e.message}`); }
+            render();
+        };
+        const removeSongFromCol = async (p) => {
+            const entry = state.myLists.find(x => x.key === state.colMyKey);
+            if (!entry || state.colLoading) return;
+            try {
+                let upd, msg;
+                if (Array.isArray(entry.songs)) {
+                    const songs = entry.songs.filter(s => `${s.source}:${s.id}` !== p.id);
+                    upd = await folium.rpc.call('updateMyList', { key: entry.key, songs });
+                    msg = `已移出「${p.title}」`;
+                } else if ((entry.added || []).some(s => `${s.source}:${s.id}` === p.id)) {
+                    const added = entry.added.filter(s => `${s.source}:${s.id}` !== p.id);
+                    upd = await folium.rpc.call('updateMyList', { key: entry.key, added });
+                    msg = `已移出「${p.title}」（本地加歌）`;
+                } else {
+                    const removed = (entry.removed || []).concat(p.id);
+                    upd = await folium.rpc.call('updateMyList', { key: entry.key, removed });
+                    msg = `已移出「${p.title}」（仅本收藏，不影响平台原歌单）`;
+                }
+                state.myLists = state.myLists.map(x => x.key === entry.key ? upd : x);
+                state.colSongs = state.colSongs.filter(s => s.id !== p.id);
+                state.colTotal = state.colSongs.length;
+                state.error = state.colSongs.length ? '' : '该列表暂无歌曲';
+                toast(msg);
+            } catch (e) { toast(`移出失败：${e && e.message}`); }
+            render();
+        };
+        const doMerge = async () => {
+            if (state.merging || state.mySel.length < 2) return;
+            const picked = state.mySel.map(k => state.myLists.find(x => x.key === k)).filter(Boolean);
+            if (picked.length < 2) { toast('请先勾选至少两个收藏'); return; }
+            state.merging = true; state.error = '';
+            render();
+            try {
+                const seenId = new Set(), seenSong = new Set();
+                const songs = [];
+                let removed = 0;
+                const norm = (v) => String(v || '').toLowerCase().replace(/\s+/g, ' ').trim();
+                for (const entry of picked) {
+                    let raw;
+                    if (Array.isArray(entry.songs)) raw = entry.songs;
+                    else {
+                        const r = await folium.rpc.call('discoverSongs', { source: entry.source, kind: entry.kind, id: entry.id });
+                        raw = (r.songs || []).map(s => ({ ...s, source: entry.source })).concat(entry.added || []);
+                    }
+                    for (const s of raw) {
+                        const src = s.source || entry.source;
+                        const p = platformToProviderSong(src, s);
+                        const t = norm(p.title), a = norm((p.artists || []).join(','));
+                        const k2 = t && a ? `${t}|${a}` : '';
+                        if (seenId.has(p.id) || (k2 && seenSong.has(k2))) { removed += 1; continue; }
+                        seenId.add(p.id); if (k2) seenSong.add(k2);
+                        songs.push({ ...s, source: src });
+                    }
+                }
+                if (!songs.length) throw new Error('所选收藏里没有歌曲');
+                const name = picked.map(x => x.name || x.id).join(' + ');
+                const entry = await folium.rpc.call('saveMergedList', { name, picUrl: picked[0].picUrl || '', songs });
+                state.myLists = [entry].concat(state.myLists.filter(x => x.key !== entry.key));
+                state.myMerge = false; state.mySel = [];
+                toast(`已合并为「${entry.name}」：${entry.total} 首，去掉 ${removed} 首重复`);
+            } catch (e) {
+                toast(`合并失败：${e && e.message}`);
+            }
+            state.merging = false;
+            render();
+        };
         const doImport = async () => {
             const text = state.importText.trim();
             if (!text || state.importing) return;
@@ -830,9 +1009,8 @@ export default async function activate(folium) {
                 const r = await folium.rpc.call('importPlaylist', { url: text });
                 if (!r || !r.source || !r.id) throw new Error('无法识别该链接');
                 state.src = r.source;
-                state.view = r.kind === 'album' ? 'album' : 'playlist';
+                if (state.view !== 'my') state.view = r.kind === 'album' ? 'album' : 'playlist';
                 state.col = null; state.importText = '';
-                state.myMode = false;
                 state.cats = []; state.cat = '';
                 state.lists = []; state.listPage = 1; state.listHasMore = false; state.unsupported = '';
                 render();
@@ -852,8 +1030,9 @@ export default async function activate(folium) {
                         name: (state.col && state.col.name) || '', picUrl: (state.col && state.col.picUrl) || '', total: state.colTotal,
                     });
                     state.myLists = [entry].concat(state.myLists.filter(x => x.key !== entry.key));
+                    state.colMyKey = entry.key;
                 } catch { /* 收藏失败不影响导入 */ }
-                toast(`已导入 ${PLATFORMS[r.source].label}${r.kind === 'album' ? '专辑' : '歌单'}，可在「歌单 → 我的」找到`);
+                toast(`已导入 ${PLATFORMS[r.source].label}${r.kind === 'album' ? '专辑' : '歌单'}，可在「我的」找到`);
             } catch (e) {
                 toast(`导入失败：${e && e.message}`);
             }
@@ -862,12 +1041,18 @@ export default async function activate(folium) {
         };
 
         const resetDiscover = () => {
-            state.col = null; state.colSongs = []; state.cats = []; state.cat = '';
+            state.col = null; state.colSongs = []; state.colMyKey = null; state.cats = []; state.cat = '';
             state.lists = []; state.listPage = 1; state.listHasMore = false; state.unsupported = ''; state.error = '';
         };
         const enterView = async () => {
             const src = state.src, view = state.view;
-            state.myMode = false;
+            state.myMerge = false; state.mySel = []; state.renamingKey = '';
+            if (view === 'my') {
+                state.col = null; state.colSongs = []; state.colMyKey = null; state.error = '';
+                render();
+                await loadMyLists();
+                return;
+            }
             if (view === 'charts') {
                 state.boardId = null; state.songs = []; state.error = '';
                 render();
@@ -897,7 +1082,7 @@ export default async function activate(folium) {
             try {
                 const kind = discoverKind();
                 const cats = await loadCats(src, kind);
-                if (state.src !== src || state.view !== view || state.myMode) return;
+                if (state.src !== src || state.view !== view) return;
                 state.cats = cats;
                 state.cat = cats.length ? cats[0].id : '';
             } catch { /* 分类失败仍可加载默认列表 */ }
@@ -956,7 +1141,7 @@ export default async function activate(folium) {
             const ready = Boolean(settings.get().enabled) && Boolean(status && status.ready);
             head.appendChild(el('span', `lx-chip${ready ? '' : ' bad'}`, ready ? `脚本：${status.scriptName || '就绪'}` : '脚本未就绪'));
             const tabs = el('div', 'lx-tabs');
-            for (const [v, label] of [['charts', '榜单'], ['recommend', '推荐'], ['playlist', '歌单'], ['album', '专辑'], ['search', '搜索'], ['sources', '音源']]) {
+            for (const [v, label] of [['my', '我的'], ['charts', '榜单'], ['recommend', '推荐'], ['playlist', '歌单'], ['album', '专辑'], ['search', '搜索'], ['sources', '音源']]) {
                 const b = el('button', `lx-tab${state.view === v ? ' on' : ''}`, label);
                 b.onclick = () => { if (state.view === v) return; state.view = v; void enterView(); };
                 tabs.appendChild(b);
@@ -964,20 +1149,11 @@ export default async function activate(folium) {
             head.appendChild(tabs);
             root.appendChild(head);
 
-            if (state.view !== 'search' && state.view !== 'sources') {
+            if (state.view !== 'search' && state.view !== 'sources' && state.view !== 'my') {
                 const plats = el('div', 'lx-plats');
-                if (state.view === 'playlist') {
-                    const bMy = el('button', `lx-plat${state.myMode ? ' on' : ''}`, '我的');
-                    bMy.onclick = () => {
-                        if (state.myMode) return;
-                        state.myMode = true; state.col = null; state.colSongs = []; state.error = '';
-                        void loadMyLists();
-                    };
-                    plats.appendChild(bMy);
-                }
                 for (const s of SRC_ORDER) {
-                    const b = el('button', `lx-plat${!state.myMode && state.src === s ? ' on' : ''}`, PLATFORMS[s].label);
-                    b.onclick = () => { if (state.src === s && !state.myMode) return; state.src = s; void enterView(); };
+                    const b = el('button', `lx-plat${state.src === s ? ' on' : ''}`, PLATFORMS[s].label);
+                    b.onclick = () => { if (state.src === s) return; state.src = s; void enterView(); };
                     plats.appendChild(b);
                 }
                 root.appendChild(plats);
@@ -1228,7 +1404,7 @@ export default async function activate(folium) {
                 const main = el('div', 'lx-main');
                 const ch = el('div', 'lx-colhead');
                 const back = el('button', 'lx-btn ghost', '← 返回');
-                back.onclick = () => { state.col = null; state.colSongs = []; state.error = ''; render(); };
+                back.onclick = () => { state.col = null; state.colSongs = []; state.colMyKey = null; state.error = ''; render(); };
                 ch.appendChild(back);
                 if (state.col.picUrl) {
                     const img = el('img');
@@ -1239,7 +1415,8 @@ export default async function activate(folium) {
                 const info = el('div', 'lx-colinfo');
                 const csrc = state.colSrc || state.src;
                 info.appendChild(el('div', 'lx-colname', state.col.name || '列表'));
-                info.appendChild(el('div', 'lx-colsub', `${PLATFORMS[csrc] ? PLATFORMS[csrc].label : csrc}${state.colTotal ? ` · ${state.colTotal} 首` : ''}`));
+                const kindLabel = state.col.kind === 'merged' ? '合并歌单' : state.col.kind === 'like' ? '我喜欢' : state.col.kind === 'local' ? '本地歌单' : (PLATFORMS[csrc] ? PLATFORMS[csrc].label : csrc);
+                info.appendChild(el('div', 'lx-colsub', `${kindLabel}${state.colTotal ? ` · ${state.colTotal} 首` : ''}`));
                 ch.appendChild(info);
                 const myKey = `${csrc}:${state.col.kind}:${state.col.id}`;
                 const saved = state.myLists.some(x => x.key === myKey);
@@ -1248,6 +1425,7 @@ export default async function activate(folium) {
                     if (saved) {
                         await folium.rpc.call('removeMyList', { key: myKey }).catch(() => {});
                         state.myLists = state.myLists.filter(x => x.key !== myKey);
+                        if (state.colMyKey === myKey) state.colMyKey = null;
                         toast('已取消收藏');
                     } else {
                         try {
@@ -1256,7 +1434,7 @@ export default async function activate(folium) {
                                 name: state.col.name || '', picUrl: state.col.picUrl || '', total: state.colTotal,
                             });
                             state.myLists = [entry].concat(state.myLists.filter(x => x.key !== entry.key));
-                            toast('已收藏到「歌单 → 我的」');
+                            toast('已收藏到「我的」');
                         } catch (e) { toast(`收藏失败：${e && e.message}`); }
                     }
                     render();
@@ -1267,13 +1445,13 @@ export default async function activate(folium) {
                 bAll.onclick = () => playAll(state.colSongs.map(s => s.id));
                 ch.appendChild(bAll);
                 main.appendChild(ch);
-                main.appendChild(songListEl(state.colSongs, state.colLoading, state.error, '暂无歌曲'));
+                main.appendChild(songListEl(state.colSongs, state.colLoading, state.error, '暂无歌曲', state.colMyKey ? (s) => void removeSongFromCol(s) : null));
                 root.appendChild(main);
             } else {
                 const main = el('div', 'lx-main');
                 const isPlaylistTab = state.view === 'playlist';
                 const isAlbumTab = state.view === 'album';
-                if (isPlaylistTab || isAlbumTab) {
+                if (isPlaylistTab || isAlbumTab || state.view === 'my') {
                     const imp = el('div', 'lx-import');
                     const input = el('input', 'lx-input');
                     input.placeholder = '粘贴歌单/专辑链接或分享口令（网易云/QQ/酷狗/酷我/咪咕/汽水）';
@@ -1287,7 +1465,41 @@ export default async function activate(folium) {
                     imp.appendChild(bImp);
                     main.appendChild(imp);
                 }
-                if (state.view === 'recommend' && state.src === 'qs') {
+                if (state.view === 'my') {
+                    const mt = el('div', 'lx-toolbar');
+                    const bNew = el('button', 'lx-btn sm ghost', '新建歌单');
+                    bNew.onclick = () => { state.creatingList = !state.creatingList; state.newListName = ''; render(); };
+                    mt.appendChild(bNew);
+                    const bMerge = el('button', `lx-btn sm${state.myMerge ? '' : ' ghost'}`, state.myMerge ? '退出合并' : '合并歌单');
+                    bMerge.onclick = () => { state.myMerge = !state.myMerge; state.mySel = []; state.renamingKey = ''; render(); };
+                    mt.appendChild(bMerge);
+                    if (state.myMerge) {
+                        mt.appendChild(el('span', 'lx-note', '勾选至少两个收藏，去重后合并为一个新收藏（原收藏保留）'));
+                        const bDo = el('button', 'lx-btn sm', state.merging ? '合并中…' : `合并所选（${state.mySel.length}）`);
+                        bDo.disabled = state.merging || state.mySel.length < 2;
+                        bDo.onclick = () => void doMerge();
+                        mt.appendChild(bDo);
+                    }
+                    main.appendChild(mt);
+                    if (state.creatingList) {
+                        const cr = el('div', 'lx-import');
+                        const inp = el('input', 'lx-input');
+                        inp.placeholder = '新建歌单名称';
+                        inp.value = state.newListName;
+                        inp.oninput = () => { state.newListName = inp.value; };
+                        inp.onkeydown = (e) => { if (e.key === 'Enter') void commitCreateList(); };
+                        const bOk = el('button', 'lx-btn', '创建');
+                        bOk.onclick = () => void commitCreateList();
+                        const bNo = el('button', 'lx-btn ghost', '取消');
+                        bNo.onclick = () => { state.creatingList = false; render(); };
+                        cr.appendChild(inp);
+                        cr.appendChild(bOk);
+                        cr.appendChild(bNo);
+                        main.appendChild(cr);
+                    }
+                    main.appendChild(myListsEl());
+                    root.appendChild(main);
+                } else if (state.view === 'recommend' && state.src === 'qs') {
                     const toolbar = el('div', 'lx-toolbar');
                     toolbar.appendChild(el('span', 'lx-boardname', '每日推荐'));
                     toolbar.appendChild(el('span', 'lx-count', state.feedSongs.length ? `${state.feedSongs.length} 首` : ''));
@@ -1304,7 +1516,7 @@ export default async function activate(folium) {
                     main.appendChild(songListEl(state.feedSongs, state.feedLoading, state.error, '暂无推荐'));
                     root.appendChild(main);
                 } else {
-                    if (!state.myMode && state.cats.length > 1) {
+                    if (state.cats.length > 1) {
                         const catsRow = el('div', 'lx-cats');
                         for (const c of state.cats) {
                             const b = el('button', `lx-cat${state.cat === c.id ? ' on' : ''}`, c.name);
@@ -1314,7 +1526,7 @@ export default async function activate(folium) {
                         }
                         main.appendChild(catsRow);
                     }
-                    if (state.view === 'playlist' && state.src === 'qs' && !state.myMode) {
+                    if (state.view === 'playlist' && state.src === 'qs') {
                         const bar = el('div', 'lx-searchbar');
                         const input = el('input', 'lx-input');
                         input.placeholder = '搜索歌单关键词，如：热门 / 粤语 / 周杰伦';
@@ -1326,9 +1538,7 @@ export default async function activate(folium) {
                         bar.appendChild(bGo);
                         main.appendChild(bar);
                     }
-                    if (state.view === 'playlist' && state.myMode) {
-                        main.appendChild(myListsEl());
-                    } else if (state.unsupported) {
+                    if (state.unsupported) {
                         main.appendChild(el('div', 'lx-msg', state.unsupported));
                     } else {
                         const grid = el('div', 'lx-grid');
@@ -1373,6 +1583,7 @@ export default async function activate(folium) {
 
         return () => {
             uiScroll = [];
+            listsGetter = null; listsSync = null;
             const collect = (n) => {
                 if (n.scrollTop > 0) uiScroll.push({ cls: n.className, top: n.scrollTop });
                 for (const c of n.children || []) collect(c);
@@ -1386,16 +1597,232 @@ export default async function activate(folium) {
         };
     };
 
+    // ---- 播放页收藏（进度条按钮 + 播放器面板标签）----
+    let listsGetter = null, listsSync = null;
+    const readLists = async () => {
+        if (listsGetter) return listsGetter();
+        const v = await folium.rpc.call('myLists');
+        return Array.isArray(v) ? v : [];
+    };
+    const refreshLists = async () => {
+        const v = await folium.rpc.call('myLists');
+        const lists = Array.isArray(v) ? v : [];
+        if (listsSync) listsSync(lists);
+        return lists;
+    };
+    const hostToast = (msg) => { try { folium.ui.toast(msg); } catch { /* 旧宿主无 ui.toast */ } };
+    const currentRawSong = async () => {
+        try {
+            const st = await folium.playback.getState();
+            const s = st && st.song;
+            if (!s) return null;
+            // 旧宿主 ref 是 {source,id} 的 JSON 串；现宿主 ref 为 song-xxx 不透明句柄，需靠 source+id 识别
+            let pid = null;
+            if (typeof s.ref === 'string' && s.ref.charAt(0) === '{') {
+                const ref = JSON.parse(s.ref);
+                if (ref && ref.source === PROVIDER_SOURCE) pid = String(ref.id);
+            } else if (s.source === PROVIDER_SOURCE && s.id !== undefined && s.id !== null) {
+                pid = String(s.id);
+            }
+            if (!pid) return null;
+            const p = splitId(pid);
+            if (!p || !PLATFORMS[p.src]) return null;
+            const cached = metaCache.get(pid);
+            if (cached) return { ...cached, source: p.src };
+            return {
+                id: p.hostId, name: s.title || '', singer: s.artist || (s.artists || []).join(' / '),
+                picUrl: s.coverUrl || '', intervalSec: s.durationMs ? Math.round(s.durationMs / 1000) : 0,
+                albumName: s.album || '', source: p.src,
+            };
+        } catch { return null; }
+    };
+    const shownTotalOf = (item) => Array.isArray(item.songs) ? (item.total || 0)
+        : Math.max(0, (item.total || 0) - (item.removed || []).length) + (item.added || []).length;
+    const collectCurrent = async (key) => {
+        const raw = await currentRawSong();
+        if (!raw) { hostToast('当前没有正在播放的汇声音源歌曲'); return null; }
+        try {
+            const r = await folium.rpc.call('addSongToList', { key, song: raw });
+            await refreshLists();
+            hostToast(r.inserted ? `已收藏到「${r.entry.name}」` : `已在「${r.entry.name}」中`);
+            return r;
+        } catch (e) { hostToast(`收藏失败：${e && e.message}`); return null; }
+    };
+    const toggleLikeCurrent = async () => {
+        const raw = await currentRawSong();
+        if (!raw) { hostToast('当前没有正在播放的汇声音源歌曲'); return; }
+        try {
+            const like = await folium.rpc.call('ensureLikeList');
+            const k = `${raw.source}:${raw.id}`;
+            if ((like.songs || []).some(s => `${s.source}:${s.id}` === k)) {
+                await folium.rpc.call('updateMyList', { key: like.key, songs: like.songs.filter(s => `${s.source}:${s.id}` !== k) });
+                hostToast('已从我喜欢移除');
+            } else {
+                await folium.rpc.call('addSongToList', { key: like.key, song: raw });
+                hostToast('已加入我喜欢');
+            }
+            await refreshLists();
+        } catch (e) { hostToast(`操作失败：${e && e.message}`); }
+    };
+    const mountProgressButton = (container, ctx, kind) => {
+        const SVG_NS = 'http://www.w3.org/2000/svg';
+        const btn = document.createElement('button');
+        btn.style.cssText = 'display:inline-flex;align-items:center;gap:4px;background:transparent;border:0;cursor:pointer;padding:4px 6px;font-size:12px;font-weight:500;line-height:1;opacity:.6;transition:opacity .15s ease,color .2s ease,transform .1s ease;';
+        const icon = document.createElementNS(SVG_NS, 'svg');
+        icon.setAttribute('viewBox', '0 0 24 24');
+        icon.setAttribute('width', '15');
+        icon.setAttribute('height', '15');
+        icon.style.cssText = 'display:block;flex:none;';
+        const shape = document.createElementNS(SVG_NS, 'path');
+        shape.setAttribute('d', kind === 'like'
+            ? 'M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z'
+            : 'm19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z');
+        shape.setAttribute('fill', 'none');
+        shape.setAttribute('stroke', 'currentColor');
+        shape.setAttribute('stroke-width', '2');
+        shape.setAttribute('stroke-linecap', 'round');
+        shape.setAttribute('stroke-linejoin', 'round');
+        icon.appendChild(shape);
+        btn.appendChild(icon);
+        if (kind === 'collect') btn.appendChild(document.createElement('span')).textContent = '收藏';
+        container.appendChild(btn);
+        let alive = true, liked = false, hovered = false;
+        const getColors = () => { try { return (ctx && ctx.getColors && ctx.getColors()) || {}; } catch { return {}; } };
+        const paintOpacity = () => { btn.style.opacity = hovered || liked ? '1' : '.6'; };
+        const paint = async () => {
+            if (!alive) return;
+            const c = getColors();
+            const text = c.text || 'inherit';
+            if (kind === 'collect') {
+                btn.style.color = text;
+                btn.title = '收藏当前歌曲到指定歌单';
+                paintOpacity();
+                return;
+            }
+            const raw = await currentRawSong();
+            const lists = await readLists();
+            const like = lists.find(x => x.kind === 'like');
+            liked = Boolean(raw && like && (like.songs || []).some(s => `${s.source}:${s.id}` === `${raw.source}:${raw.id}`));
+            shape.setAttribute('fill', liked ? 'currentColor' : 'none');
+            btn.style.color = liked ? (c.fill || text) : text;
+            btn.title = liked ? '从我喜欢移除' : '加入我喜欢';
+            paintOpacity();
+        };
+        btn.onmouseenter = () => { hovered = true; paintOpacity(); };
+        btn.onmouseleave = () => { hovered = false; paintOpacity(); };
+        btn.onmousedown = () => { btn.style.transform = 'scale(.92)'; };
+        btn.onmouseup = () => { btn.style.transform = ''; };
+        btn.onclick = () => {
+            if (kind === 'collect') {
+                try {
+                    // 宿主面板只在播放页渲染，首页开面板会隐藏首页却看不到面板；navigateToPlayer 无幂等守卫，仅在非播放页时跳转
+                    if (window.location.hash !== '#player') folium.ui.navigate('player');
+                    folium.ui.openPlayerPanel('collect');
+                } catch { /* 旧宿主无面板接口 */ }
+                return;
+            }
+            void toggleLikeCurrent().then(paint);
+        };
+        const unsub = ctx && ctx.subscribe ? ctx.subscribe(() => void paint()) : null;
+        const timer = setInterval(() => void paint(), 1500);
+        void paint();
+        return () => {
+            alive = false; clearInterval(timer);
+            if (typeof unsub === 'function') unsub();
+            btn.remove();
+        };
+    };
+    const mountCollectPanel = (container) => {
+        const root = document.createElement('div');
+        root.style.cssText = 'padding:12px;display:flex;flex-direction:column;gap:8px;color:inherit;font-size:13px;';
+        container.appendChild(root);
+        let alive = true, painting = false;
+        const rowBtn = (label, sub) => {
+            const b = document.createElement('button');
+            b.style.cssText = 'display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 10px;border-radius:8px;border:1px solid rgba(128,128,128,.35);background:transparent;color:inherit;cursor:pointer;text-align:left;font-size:13px;';
+            b.appendChild(document.createElement('span')).textContent = label;
+            b.appendChild(document.createElement('span')).textContent = sub || '';
+            return b;
+        };
+        const paint = async () => {
+            if (!alive || painting) return;
+            painting = true;
+            try {
+                const raw = await currentRawSong();
+                const lists = await readLists();
+                while (root.children.length) root.children[0].remove();
+                const head = document.createElement('div');
+                head.style.cssText = 'font-size:14px;font-weight:600;';
+                head.textContent = raw ? `${raw.name} - ${raw.singer || '未知歌手'}` : '当前没有正在播放的汇声音源歌曲';
+                root.appendChild(head);
+                root.appendChild(document.createElement('div')).textContent = '收藏当前歌曲到：';
+                const like = lists.find(x => x.kind === 'like');
+                const bLike = rowBtn('我喜欢', like ? `${shownTotalOf(like)} 首` : '首次收藏时自动创建');
+                bLike.onclick = () => void (async () => {
+                    const target = like || await folium.rpc.call('ensureLikeList');
+                    await collectCurrent(target.key);
+                    void paint();
+                })();
+                root.appendChild(bLike);
+                for (const item of lists.filter(x => x.kind !== 'like')) {
+                    const b = rowBtn(item.name || item.id, `${shownTotalOf(item)} 首`);
+                    b.onclick = () => void collectCurrent(item.key).then(paint);
+                    root.appendChild(b);
+                }
+                const createRow = document.createElement('div');
+                createRow.style.cssText = 'display:flex;gap:6px;';
+                const inp = document.createElement('input');
+                inp.placeholder = '新建歌单名称';
+                inp.style.cssText = 'flex:1;min-width:0;padding:6px 10px;border-radius:8px;border:1px solid rgba(128,128,128,.35);background:transparent;color:inherit;font-size:13px;outline:none;';
+                const bCreate = document.createElement('button');
+                bCreate.textContent = '新建并收藏';
+                bCreate.style.cssText = 'padding:6px 10px;border-radius:8px;border:1px solid rgba(128,128,128,.35);background:transparent;color:inherit;cursor:pointer;font-size:13px;';
+                bCreate.onclick = () => void (async () => {
+                    const name = inp.value.trim();
+                    if (!name) { hostToast('名称不能为空'); return; }
+                    try {
+                        const entry = await folium.rpc.call('createMyList', { name });
+                        await collectCurrent(entry.key);
+                        await refreshLists();
+                        void paint();
+                    } catch (e) { hostToast(`新建失败：${e && e.message}`); }
+                })();
+                createRow.appendChild(inp);
+                createRow.appendChild(bCreate);
+                root.appendChild(createRow);
+                root.appendChild(document.createElement('div')).textContent = '本地增删只影响本插件收藏，不修改平台歌单';
+            } finally { painting = false; }
+        };
+        const timer = setInterval(() => void paint(), 1500);
+        void paint();
+        return () => { alive = false; clearInterval(timer); root.remove(); };
+    };
+
     const homeTabHandle = folium.registries.homeTabs.register({
         id: 'lx-home',
         label: L('发现', 'Discover'),
         order: 10,
         mount: mountHome,
     });
+    const progressLikeHandle = folium.registries.progressButtons && folium.registries.progressButtons.register({
+        id: 'like', slot: 'progress.trailing', order: 40, hideWhenCollapsed: true,
+        mount: (c, ctx) => mountProgressButton(c, ctx, 'like'),
+    });
+    const progressCollectHandle = folium.registries.progressButtons && folium.registries.progressButtons.register({
+        id: 'collect', slot: 'progress.trailing', order: 41, hideWhenCollapsed: true,
+        mount: (c, ctx) => mountProgressButton(c, ctx, 'collect'),
+    });
+    const panelHandle = folium.registries.playerPanelTabs && folium.registries.playerPanelTabs.register({
+        id: 'collect', label: L('汇声收藏', 'Collect'), order: 40,
+        mount: mountCollectPanel,
+    });
 
     return () => {
         disposeSettings();
         if (providerHandle) providerHandle.unregister();
         homeTabHandle.unregister();
+        if (progressLikeHandle) progressLikeHandle.unregister();
+        if (progressCollectHandle) progressCollectHandle.unregister();
+        if (panelHandle) panelHandle.unregister();
     };
 }

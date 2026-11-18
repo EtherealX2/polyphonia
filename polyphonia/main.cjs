@@ -1306,7 +1306,7 @@ module.exports = function activate(api) {
             total: Number(item.total) || 0, addedAt: Date.now(),
         };
         const i = lists.findIndex(x => x.key === key);
-        if (i >= 0) lists[i] = { ...entry, addedAt: lists[i].addedAt || entry.addedAt };
+        if (i >= 0) lists[i] = { ...entry, addedAt: lists[i].addedAt || entry.addedAt, removed: lists[i].removed, added: lists[i].added };
         else lists.unshift(entry);
         await api.storage.set('myLists', lists.slice(0, 200));
         return entry;
@@ -1316,6 +1316,131 @@ module.exports = function activate(api) {
         const next = lists.filter(x => x.key !== String(key));
         await api.storage.set('myLists', next);
         return { removed: lists.length - next.length };
+    };
+    const saveMergedList = async ({ name, picUrl, songs }) => {
+        if (!Array.isArray(songs) || !songs.length) throw new Error('合并结果为空');
+        if (songs.length > 5000) throw new Error('合并结果过大（超过 5000 首）');
+        const clean = songs.filter(s => s && typeof s.source === 'string');
+        if (!clean.length) throw new Error('合并结果为空');
+        const id = Date.now().toString(36);
+        const entry = {
+            key: `merged:merged:${id}`, source: 'merged', kind: 'merged', id,
+            name: String(name || '合并歌单').slice(0, 120), picUrl: String(picUrl || ''),
+            total: clean.length, addedAt: Date.now(), songs: clean,
+        };
+        const lists = await getMyLists();
+        lists.unshift(entry);
+        await api.storage.set('myLists', lists.slice(0, 200));
+        return entry;
+    };
+    const updateMyList = async ({ key, name, songs, removed, added }) => {
+        const lists = await getMyLists();
+        const entry = lists.find(x => x.key === String(key));
+        if (!entry) throw new Error('收藏不存在');
+        if (typeof name === 'string') {
+            const t = name.trim();
+            if (!t) throw new Error('名称不能为空');
+            entry.name = t.slice(0, 120);
+        }
+        if (Array.isArray(songs)) {
+            if (!['merged', 'local', 'like'].includes(entry.kind)) throw new Error('该收藏不支持直接修改歌曲');
+            if (songs.length > 5000) throw new Error('歌单过大（超过 5000 首）');
+            entry.songs = songs.filter(s => s && typeof s.source === 'string');
+            entry.total = entry.songs.length;
+        }
+        if (Array.isArray(removed)) {
+            entry.removed = removed.filter(k => typeof k === 'string').slice(0, 5000);
+        }
+        if (Array.isArray(added)) {
+            if (['merged', 'local', 'like'].includes(entry.kind)) throw new Error('该收藏不支持本地加歌字段');
+            entry.added = added.filter(s => s && typeof s.source === 'string').slice(0, 5000);
+        }
+        await api.storage.set('myLists', lists);
+        return entry;
+    };
+    const createMyList = async ({ name }) => {
+        const t = String(name || '').trim();
+        if (!t) throw new Error('名称不能为空');
+        const id = Date.now().toString(36);
+        const entry = {
+            key: `local:local:${id}`, source: 'local', kind: 'local', id,
+            name: t.slice(0, 120), picUrl: '', total: 0, addedAt: Date.now(), songs: [],
+        };
+        const lists = await getMyLists();
+        lists.unshift(entry);
+        await api.storage.set('myLists', lists.slice(0, 200));
+        return entry;
+    };
+    const ensureLikeList = async () => {
+        const lists = await getMyLists();
+        const found = lists.find(x => x.kind === 'like');
+        if (found) return found;
+        const entry = {
+            key: 'like:like:default', source: 'like', kind: 'like', id: 'default',
+            name: '我喜欢', picUrl: '', total: 0, addedAt: Date.now(), songs: [],
+        };
+        lists.unshift(entry);
+        await api.storage.set('myLists', lists.slice(0, 200));
+        return entry;
+    };
+    const addSongToList = async ({ key, song }) => {
+        if (!song || typeof song.source !== 'string' || song.id === undefined || song.id === null || !String(song.name || '').trim()) throw new Error('歌曲信息不完整');
+        const lists = await getMyLists();
+        const entry = lists.find(x => x.key === String(key));
+        if (!entry) throw new Error('收藏不存在');
+        const k = `${song.source}:${song.id}`;
+        const clean = {
+            id: song.id, name: String(song.name), singer: String(song.singer || ''),
+            picUrl: String(song.picUrl || ''), intervalSec: Number(song.intervalSec) || 0,
+            albumName: String(song.albumName || ''), source: song.source,
+        };
+        if (['merged', 'local', 'like'].includes(entry.kind)) {
+            const songs = Array.isArray(entry.songs) ? entry.songs : [];
+            if (songs.some(s => `${s.source}:${s.id}` === k)) return { entry, inserted: false };
+            if (songs.length >= 5000) throw new Error('歌单过大（超过 5000 首）');
+            entry.songs = songs.concat(clean);
+            entry.total = entry.songs.length;
+        } else {
+            const added = Array.isArray(entry.added) ? entry.added : [];
+            if (added.some(s => `${s.source}:${s.id}` === k)) return { entry, inserted: false };
+            if (added.length >= 5000) throw new Error('歌单过大（超过 5000 首）');
+            entry.added = added.concat(clean);
+        }
+        await api.storage.set('myLists', lists);
+        return { entry, inserted: true };
+    };
+    const exportMyList = async ({ key }) => {
+        const lists = await getMyLists();
+        const entry = lists.find(x => x.key === String(key));
+        if (!entry) throw new Error('收藏不存在');
+        let songs;
+        if (Array.isArray(entry.songs)) {
+            songs = entry.songs;
+        } else {
+            const r = await fetchDiscoverSongs(entry.source, entry.kind, entry.id);
+            const rem = new Set(Array.isArray(entry.removed) ? entry.removed : []);
+            songs = (r.songs || []).filter(s => !rem.has(`${entry.source}:${s.id}`));
+            const have = new Set(songs.map(s => `${entry.source}:${s.id}`));
+            for (const s of Array.isArray(entry.added) ? entry.added : []) {
+                const k = `${s.source}:${s.id}`;
+                if (!have.has(k)) { have.add(k); songs.push(s); }
+            }
+        }
+        const clean = songs.map(s => ({
+            id: s.id, name: String(s.name || ''), singer: String(s.singer || ''),
+            picUrl: String(s.picUrl || ''), intervalSec: Number(s.intervalSec) || 0,
+            albumName: String(s.albumName || ''), source: s.source || entry.source,
+        }));
+        const dir = path.join(dataDir, 'exports');
+        fs.mkdirSync(dir, { recursive: true });
+        const safe = String(entry.name || entry.id).replace(/[\\/:*?"<>|]/g, '_').trim().slice(0, 80) || 'playlist';
+        const file = path.join(dir, `${safe}.json`);
+        fs.writeFileSync(file, JSON.stringify({
+            name: entry.name || '', kind: entry.kind, source: entry.source || null,
+            exportedAt: new Date().toISOString(), total: clean.length, songs: clean,
+        }, null, 2), 'utf8');
+        debug('exportMyList', entry.key, clean.length, file);
+        return { file, total: clean.length };
     };
 
     // ---- 音源脚本管理（导入/编辑/删除，脚本与插件本体分离）----
@@ -1383,6 +1508,12 @@ module.exports = function activate(api) {
     api.rpc.handle('myLists', () => getMyLists());
     api.rpc.handle('saveMyList', (arg) => saveMyList(arg));
     api.rpc.handle('removeMyList', (arg) => removeMyList(arg && arg.key));
+    api.rpc.handle('updateMyList', (arg) => updateMyList(arg || {}));
+    api.rpc.handle('createMyList', (arg) => createMyList(arg || {}));
+    api.rpc.handle('ensureLikeList', () => ensureLikeList());
+    api.rpc.handle('addSongToList', (arg) => addSongToList(arg || {}));
+    api.rpc.handle('exportMyList', (arg) => exportMyList(arg || {}));
+    api.rpc.handle('saveMergedList', (arg) => saveMergedList(arg || {}));
     api.rpc.handle('importScript', (arg) => importScript(arg || {}));
     api.rpc.handle('readScript', (arg) => readScript(arg && arg.file));
     api.rpc.handle('saveScript', (arg) => saveScript(arg || {}));
