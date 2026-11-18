@@ -74,7 +74,7 @@ Polyphonia（汇声）是为 Folia 打造的自定义音源壳插件：导入一
 
 ## 安装
 
-1. 下载本帖附件 `polyphonia-1.0.0.zip`。
+1. 从 GitHub Releases 下载 `polyphonia-1.0.0.zip`。
 2. Folia 设置 → 模组页：把 zip 直接拖进页面即可安装；或手动解压，将包内 `polyphonia` 文件夹放入 mods 目录：
    - Windows：`%APPDATA%\Folia\mods\polyphonia`
    - macOS：`~/Library/Application Support/Folia/mods/polyphonia`
@@ -101,4 +101,4 @@ Polyphonia（汇声）是为 Folia 打造的自定义音源壳插件：导入一
 4. 使用者应遵守著作权法律法规及各平台服务条款，尊重版权方权益；如权利人提出异议，应立即停止使用并删除相关脚本与内容。
 5. 使用本插件的风险由使用者自行承担，作者不对因使用或无法使用本插件造成的任何直接或间接损失负责。
 
-使用中遇到问题欢迎回帖反馈，请附 Folia 版本、脚本名称与复现步骤。
+使用中遇到问题欢迎提 Issue 反馈，请附 Folia 版本、脚本名称与复现步骤。
