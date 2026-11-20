@@ -6,7 +6,7 @@ Polyphonia（汇声）是为 Folia 打造的自定义音源壳插件：导入一
 
 ![SnowShot_2026-11-17_08-53-39](dist/images/SnowShot_2026-11-17_08-53-39.png)
 
-当前版本：1.0.0　|　要求：Folia ≥ 0.7.20（Folium 1.7+），已开启模组系统
+当前版本：1.0.1　|　要求：Folia ≥ 0.7.20（Folium 1.7+，兼容 Folium 2），已开启模组系统
 
 ## 功能
 
@@ -39,6 +39,12 @@ Polyphonia（汇声）是为 Folia 打造的自定义音源壳插件：导入一
 - **歌词**：复用 Folia 宿主接口，桌面歌词与播放页特效正常。
 
 ---
+
+## 1.0.1 更新（Folium 2 兼容优化）
+
+- 适配 Folium 2 宿主：播放页喜欢 / 收藏按钮改用新订阅接口，不再出现「用了旧写法，Folium 2 起不再支持」警告；Folium 1.7 旧宿主不受影响。
+- 未导入脚本时不再误报「界面代码出错」：未选择脚本是正常状态，真实脚本加载失败仍会提示。
+- 当前音源脚本名只在「音源」页显示，其余页面不再露出。
 
 ## 新增功能（1.0.0）
 
@@ -74,7 +80,7 @@ Polyphonia（汇声）是为 Folia 打造的自定义音源壳插件：导入一
 
 ## 安装
 
-1. 从 GitHub Releases 下载 `polyphonia-1.0.0.zip`。
+1. 从 GitHub Releases 下载 `polyphonia-1.0.1.zip`（Folium 2 兼容优化版；原 1.0.0 包仍保留）。
 2. Folia 设置 → 模组页：把 zip 直接拖进页面即可安装；或手动解压，将包内 `polyphonia` 文件夹放入 mods 目录：
    - Windows：`%APPDATA%\Folia\mods\polyphonia`
    - macOS：`~/Library/Application Support/Folia/mods/polyphonia`

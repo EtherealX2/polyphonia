@@ -140,12 +140,18 @@ export default async function activate(folium) {
         onChange: (cb) => { settingCbs.add(cb); return () => settingCbs.delete(cb); },
     };
 
+    // 「未选择脚本」是全新安装的预期状态，记 error 会被 Folium 2 当成界面出错弹红条
+    const logScriptStatus = (s) => {
+        if (!s || !s.error) return;
+        if (s.error === '未选择脚本') folium.log.info(`脚本加载：${s.error}`);
+        else folium.log.error(`脚本加载：${s.error}`);
+    };
     const onSettingsChange = () => {
         const values = settings.get();
         void (async () => {
             if (values.script !== (status && status.scriptFile)) {
                 status = await folium.rpc.call('reload', { script: values.script }).catch(e => ({ error: String(e) }));
-                if (status && status.error) folium.log.error(`脚本加载：${status.error}`);
+                logScriptStatus(status);
             }
             syncProvider();
             if (uiRerender) uiRerender();
@@ -160,7 +166,7 @@ export default async function activate(folium) {
     };
 
     let status = await folium.rpc.call('reload', { script: settings.get().script }).catch(e => ({ error: String(e) }));
-    if (status && status.error) folium.log.error(`脚本加载：${status.error}`);
+    logScriptStatus(status);
     if (status && status.dataDir) folium.log.info(`脚本目录：${status.dataDir}`);
 
     // myId = `${lxSource}:${platformMediaId}`
@@ -1139,7 +1145,10 @@ export default async function activate(folium) {
             const head = el('div', 'lx-head');
             head.appendChild(el('span', 'lx-title', 'Polyphonia · 汇声'));
             const ready = Boolean(settings.get().enabled) && Boolean(status && status.ready);
-            head.appendChild(el('span', `lx-chip${ready ? '' : ' bad'}`, ready ? `脚本：${status.scriptName || '就绪'}` : '脚本未就绪'));
+            // 脚本名称只在音源页露出；其他页仅保留不含名称的未就绪警告
+            if (state.view === 'sources' || !ready) {
+                head.appendChild(el('span', `lx-chip${ready ? '' : ' bad'}`, ready ? `脚本：${status.scriptName || '就绪'}` : '脚本未就绪'));
+            }
             const tabs = el('div', 'lx-tabs');
             for (const [v, label] of [['my', '我的'], ['charts', '榜单'], ['recommend', '推荐'], ['playlist', '歌单'], ['album', '专辑'], ['search', '搜索'], ['sources', '音源']]) {
                 const b = el('button', `lx-tab${state.view === v ? ' on' : ''}`, label);
@@ -1723,7 +1732,9 @@ export default async function activate(folium) {
             }
             void toggleLikeCurrent().then(paint);
         };
-        const unsub = ctx && ctx.subscribe ? ctx.subscribe(() => void paint()) : null;
+        // Folium 2 移除了 ctx.subscribe（调用会弹弃用警告），优先 onChange；1.7 无 onChange 时回退，另有 1.5s 轮询兜底
+        const listen = ctx && (ctx.onChange || ctx.subscribe);
+        const unsub = listen ? listen.call(ctx, () => void paint()) : null;
         const timer = setInterval(() => void paint(), 1500);
         void paint();
         return () => {
