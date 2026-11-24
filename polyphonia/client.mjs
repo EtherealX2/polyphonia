@@ -1,5 +1,5 @@
 /* Polyphonia · 汇声 — 为 Folia 打造的自定义音源壳插件：六平台（网易云/QQ/酷狗/酷我/咪咕/汽水）发现页 + 聚合搜索 + 播放联动。
- * 网易云/QQ/酷狗 的搜索与歌词委托宿主内置平台（folium.omni），酷我/咪咕/汽水 由 main 进程直连接口；
+ * 网易云/酷狗搜索与歌词委托宿主内置平台（folium.omni），QQ 优先使用原始匿名搜索，酷我/咪咕/汽水由 main 进程直连接口；
  * 播放链接统一经 rpc 交给 main 里的 LX 脚本解析，失败时可自动在其他已启用平台换源重试。 */
 
 const L = (zh, en) => ({ 'zh-CN': zh, en });
@@ -34,6 +34,9 @@ const fmtCount = (n) => {
     return String(v);
 };
 const normText = (s) => String(s || '').toLowerCase().replace(/[\s()（）\[\]【】{}'’"“”,.，!！?？·\-_/\\|&:：;；]/g, '');
+const splitArtistNames = (value) => String(value || '')
+    .split(/\s*、\s*|\s+\/\s+|\s+(?:&|×|\*)\s+|\s+(?:feat\.?|ft\.?)\s+/i)
+    .map(s => s.trim()).filter(Boolean);
 const dedupeKey = (title, artists) => `${normText(title)}|${(artists || []).map(a => normText(a)).sort().join(',')}`;
 const tokenize = (q) => String(q || '').split(/[\s　]+/).map(t => t.trim()).filter(Boolean).slice(0, 6);
 // 多关键词时按「命中词数 → 标题/歌手匹配强度」排序，支持「歌名 歌手」任意顺序
@@ -95,7 +98,7 @@ export default async function activate(folium) {
     const SETTING_DEFAULTS = {
         enabled: true, script: '',
         searchWy: true, searchTx: true, searchKg: true, searchKw: true, searchMg: true, searchQs: true,
-        autoSwitch: true, quality: 'flac',
+        autoSwitch: true, originalPriority: true, quality: 'flac',
     };
     const hostSchema = (options) => [
         { key: 'enabled', type: 'boolean', label: L('启用自定义源', 'Enable custom source'), defaultValue: true },
@@ -107,6 +110,7 @@ export default async function activate(folium) {
         { key: 'searchMg', type: 'boolean', label: L('搜索包含咪咕', 'Search Migu'), defaultValue: true },
         { key: 'searchQs', type: 'boolean', label: L('搜索包含汽水', 'Search Qishui'), defaultValue: true },
         { key: 'autoSwitch', type: 'boolean', label: L('播放失败自动换源', 'Auto switch source on failure'), defaultValue: true },
+        { key: 'originalPriority', type: 'boolean', label: L('原唱优先', 'Prefer original recordings'), defaultValue: true },
         { key: 'quality', type: 'select', label: L('首选音质', 'Preferred quality'), options: QUALITY_OPTIONS, defaultValue: 'flac' },
     ];
 
@@ -168,6 +172,7 @@ export default async function activate(folium) {
     let status = await folium.rpc.call('reload', { script: settings.get().script }).catch(e => ({ error: String(e) }));
     logScriptStatus(status);
     if (status && status.dataDir) folium.log.info(`脚本目录：${status.dataDir}`);
+    const hostToast = (msg) => { try { folium.ui.toast(msg); } catch { /* 旧宿主无 ui.toast */ } };
 
     // myId = `${lxSource}:${platformMediaId}`
     const songCache = new Map();   // myId → {key, hostSong|null, song, txMid}
@@ -191,7 +196,7 @@ export default async function activate(folium) {
         const song = {
             id,
             title: hostSong.title,
-            artists: hostSong.artist ? hostSong.artist.split(' / ').filter(Boolean) : [],
+            artists: splitArtistNames(hostSong.artist),
             ...(hostSong.album ? { album: hostSong.album } : {}),
             ...(details && details.coverUrl ? { coverUrl: details.coverUrl } : {}),
             ...(details && details.durationMs ? { durationMs: details.durationMs } : {}),
@@ -210,7 +215,7 @@ export default async function activate(folium) {
         const song = {
             id,
             title: s.name,
-            artists: s.singer ? s.singer.split(' / ').filter(Boolean) : [],
+            artists: splitArtistNames(s.singer),
             ...(s.albumName ? { album: s.albumName } : {}),
             ...(s.picUrl ? { coverUrl: s.picUrl } : {}),
             ...(s.intervalSec ? { durationMs: s.intervalSec * 1000 } : {}),
@@ -219,6 +224,105 @@ export default async function activate(folium) {
         const host = PLATFORMS[src].host;
         songCache.set(id, { key: { source: host || src, id: s.id }, hostSong: null, song, txMid: (s.meta && s.meta.songmid) || null });
         return song;
+    };
+
+    const originalPriorityOn = () => settings.get().originalPriority !== false;
+    const hardVariantRules = [
+        { reason: 'cover', label: '翻唱/Cover', re: /(?:翻唱|翻版|高仿|covered\s+by|(?:^|[\s([（【{·\-_/])cover(?:版|版本)?(?:$|[\s)\]）】}]))/i },
+        { reason: 'remix', label: 'DJ/Remix/变速', re: /(?:dj(?:版|版本|remix|mix|edit|抖音|热榜|串烧)|(?:^|[\s([（【{·\-_/])dj(?:$|[\s)\]）】}])|remix|bootleg|3d(?:环绕)?(?:版)?|环绕(?:版)?|串烧|变速|变调|降调|升调|加速版|慢速版)/i },
+        { reason: 'instrumental', label: '伴奏/纯音乐', re: /(?:伴奏|纯音乐|无人声|instrumental|karaoke|阿卡贝拉|(?:^|[\s([（【{·\-_/])beat(?:版)?(?:$|[\s)\]）】}]))/i },
+        { reason: 'ugc', label: 'UGC/改编', re: /(?:网友|网络歌手|改编|改词|二创|二次创作|鬼畜|恶搞|搞笑|整活|短视频|抖音热歌|快手热歌)/i },
+        { reason: 'excerpt', label: '片段/铃声', re: /(?:手机铃声|铃声|片段|节选|副歌|高潮版|试听|preview|clip|snippet)/i },
+    ];
+    const filterReasonLabels = {
+        cover: '翻唱/Cover', remix: 'DJ/Remix/变速', instrumental: '伴奏/纯音乐',
+        ugc: 'UGC/改编', excerpt: '片段/铃声', artist: '歌手不匹配', thirdParty: '第三方翻唱',
+    };
+    const liveVariantRe = /(?:live|现场|演唱会|音乐节|晚会|跨年|春晚|cctv|音乐频道|不插电|unplugged)/i;
+    const softVariantRe = /(?:single(?:\s+version)?|demo|acoustic|piano|guitar|女声版|男声版|日语版|英语版|粤语版|国语版|钢琴|吉他|重录|重制|remaster)/i;
+    const officialVariantRe = /(?:原唱|原版|官方版|官方音频|录音室|studio|专辑版|album\s+version)/i;
+    const songMeta = (song) => {
+        const cached = metaCache.get(song.id) || {};
+        return cached.meta || cached;
+    };
+    const songArtists = (song) => (song.artists || []).map(normText).filter(Boolean);
+    const isTrustedOriginal = (song) => {
+        const meta = songMeta(song);
+        const version = Number(meta.qqVersion) || 0;
+        if (version === 0 && meta.qqPayPlay === 1 && Number(meta.qqProtect) >= 8) return true;
+        if (Number(meta.mgCopyright) === 1 || Number(meta.mgCopyrightType) === 1) return true;
+        return Number(meta.kwOriginalSongType) === 1;
+    };
+    const variantInfo = (song, tokens = [], originalHints = null) => {
+        if (!originalPriorityOn()) return { excluded: false, kind: 'original', label: '' };
+        const title = String(song.title || '');
+        const album = String(song.album || '');
+        const meta = songMeta(song);
+        const rawTitle = String(meta.kwSongName || '');
+        const text = `${title} ${album} ${rawTitle}`;
+        for (const rule of hardVariantRules) {
+            if (rule.re.test(title) || rule.re.test(album) || rule.re.test(rawTitle)) return { excluded: true, kind: 'hard', reason: rule.reason, label: rule.label };
+        }
+        const qqVersion = Number(meta.qqVersion) || 0;
+        if (qqVersion === 28) return { excluded: true, kind: 'hard', reason: 'remix', label: 'DJ/Remix/变速' };
+        if (qqVersion === 35) return { excluded: true, kind: 'hard', reason: 'cover', label: '翻唱/Cover' };
+        const artists = songArtists(song);
+        if (tokens.length === 2) {
+            const artistHit = tokens.some(t => artists.some(a => a.includes(normText(t))));
+            const titleHit = tokens.some(t => normText(title).includes(normText(t)) || normText(album).includes(normText(t)));
+            if (titleHit && !artistHit) return { excluded: true, kind: 'hard', reason: 'artist', label: '歌手不匹配' };
+        }
+        const hintedArtists = originalHints && originalHints.get(normText(title));
+        if (hintedArtists && hintedArtists.size && artists.length && !artists.some(a => hintedArtists.has(a)) && !isTrustedOriginal(song)) {
+            return { excluded: true, kind: 'hard', reason: 'thirdParty', label: '第三方翻唱' };
+        }
+        if (liveVariantRe.test(text)) return { excluded: false, kind: 'live', label: '现场版本' };
+        if (softVariantRe.test(text)) return { excluded: false, kind: 'alternate', label: '改编/重录版本' };
+        return { excluded: false, kind: 'original', label: '' };
+    };
+    const originalityScore = (song, tokens) => {
+        if (!originalPriorityOn()) return 0;
+        const meta = songMeta(song);
+        const artists = songArtists(song);
+        const text = `${song.title || ''} ${song.album || ''} ${meta.kwSongName || ''}`;
+        let score = song.album ? 8 : -12;
+        if (!artists.length) score -= 10;
+        if (isTrustedOriginal(song)) score += 28;
+        if (officialVariantRe.test(text)) score += 16;
+        for (const token of tokens) {
+            const n = normText(token);
+            if (!n) continue;
+            if (artists[0] === n) score += 40;
+            else if (artists.includes(n)) score += 12;
+            else if (artists.some(a => a.includes(n))) score += 24;
+        }
+        const version = Number(meta.qqVersion) || 0;
+        if (version) score -= Math.min(60, 20 + version);
+        if (meta.qqPayPlay != null) score += meta.qqPayPlay === 1 ? 12 : -28;
+        if (meta.qqProtect != null) score += meta.qqProtect >= 8 ? 8 : -8;
+        if (meta.qqName && meta.qqTitle && normText(meta.qqName) !== normText(meta.qqTitle)) score -= 4;
+        if (liveVariantRe.test(text)) score -= 70;
+        else if (softVariantRe.test(text)) score -= 35;
+        return score;
+    };
+
+    const searchSource = async (src, query, limit, cursor) => {
+        let resetCursor = false;
+        if (src === 'tx' && originalPriorityOn()) {
+            try {
+                const page = Math.max(1, Number(cursor) || 1);
+                const r = await folium.rpc.call('platformSearch', { source: 'tx', str: query, page, limit });
+                if (!(r.songs || []).length) throw new Error('QQ匿名搜索暂无结果');
+                return { items: r.songs.map(s => platformToProviderSong(src, s)), nextCursor: r.hasMore ? String(page + 1) : null };
+            } catch { resetCursor = true; /* 匿名搜索不可用时从宿主首页重新回退 */ }
+        }
+        if (PLATFORMS[src].host) {
+            const r = await folium.omni.searchSongs(query, { providerId: PLATFORMS[src].host, limit, ...(!resetCursor && cursor ? { cursor } : {}) });
+            return { items: (r.items || []).filter(x => x.id != null).map(x => toProviderSong(src, x)), nextCursor: r.nextCursor || null };
+        }
+        const page = Math.max(1, Number(cursor) || 1);
+        const r = await folium.rpc.call('platformSearch', { source: src, str: query, page, limit });
+        return { items: (r.songs || []).map(s => platformToProviderSong(src, s)), nextCursor: r.hasMore ? String(page + 1) : null };
     };
 
     const resolveHostSong = async (parsed) => {
@@ -295,43 +399,51 @@ export default async function activate(folium) {
         return url || null;
     };
 
-    // 自动换源：在其他已启用平台按 标题+歌手 找同一首歌
+    // 自动换源：在其他已启用平台按 标题+歌手 找同一首歌，原唱候选优先
+    const baseTitleForSearch = (value) => String(value || '')
+        .replace(/\s*[（(\[【{][^）)\]】}]*[）)\]】}]\s*$/g, '')
+        .replace(/\s+(?:live|现场版?|dj版?|remix|cover)$/i, '').trim();
     const findAlternative = async (failedSrc, song) => {
         const title = song.title || (metaCache.get(song.id) || {}).name || '';
         const artists = song.artists || [];
         if (!title) return null;
-        const q = `${title} ${artists[0] || ''}`.trim();
-        const nt = normText(title);
+        const searchTitle = baseTitleForSearch(title) || title;
+        const q = `${searchTitle} ${artists[0] || ''}`.trim();
+        const tokens = tokenize(q);
+        const nt = normText(searchTitle);
         const na = artists.map(normText).filter(Boolean);
+        let skipped = 0, sawAlternate = false;
         for (const src of enabledSrcs()) {
             if (src === failedSrc) continue;
             let candidates = [];
-            try {
-                if (PLATFORMS[src].host) {
-                    const r = await folium.omni.searchSongs(q, { providerId: PLATFORMS[src].host, limit: 8 });
-                    candidates = (r.items || []).map(x => toProviderSong(src, x));
-                } else {
-                    const r = await folium.rpc.call('platformSearch', { source: src, str: q, page: 1, limit: 8 });
-                    candidates = (r.songs || []).map(x => platformToProviderSong(src, x));
-                }
-            } catch { continue; }
+            try { candidates = (await searchSource(src, q, 8)).items; } catch { continue; }
             const scored = candidates.map(c => {
                 const ct = normText(c.title);
-                const titleHit = ct === nt || (nt.length > 3 && (ct.includes(nt) || nt.includes(ct)));
+                const titleHit = ct === nt || (nt.length >= 2 && (ct.includes(nt) || nt.includes(ct)));
                 if (!titleHit) return null;
-                const ca = (c.artists || []).map(normText);
+                const variant = variantInfo(c, tokens);
+                if (variant.excluded) { skipped++; return null; }
+                if (variant.kind !== 'original') sawAlternate = true;
+                const ca = songArtists(c);
                 const artistHit = na.length && ca.some(a => na.includes(a));
-                return { c, score: (ct === nt ? 2 : 1) + (artistHit ? 2 : 0) };
+                const primaryHit = na.length && ca[0] && na.includes(ca[0]);
+                return { c, variant, score: songScore(c, tokens) + originalityScore(c, tokens) + (primaryHit ? 10 : artistHit ? 3 : 0) };
             }).filter(Boolean).sort((a, b) => b.score - a.score);
-            if (!scored.length) continue;
-            try {
-                const url = await requestUrl(src, scored[0].c);
-                if (url) {
-                    folium.log.info(`自动换源：${PLATFORMS[failedSrc].short} → ${PLATFORMS[src].short}「${title}」`);
-                    return url;
-                }
-            } catch { /* 尝试下一个平台 */ }
+            for (const { c, variant } of scored.slice(0, 3)) {
+                try {
+                    const url = await requestUrl(src, c);
+                    if (url) {
+                        const msg = variant.kind === 'original'
+                            ? `播放失败，已自动换源到${PLATFORMS[src].short}${skipped ? `，跳过 ${skipped} 个翻唱/DJ/伴奏版本` : ''}`
+                            : `未找到可播放原唱，已使用${variant.label}（${PLATFORMS[src].short}）`;
+                        folium.log.info(`自动换源：${PLATFORMS[failedSrc].short} → ${PLATFORMS[src].short}「${title}」${skipped ? `；跳过 ${skipped} 个杂乱版本` : ''}`);
+                        hostToast(msg);
+                        return url;
+                    }
+                } catch { /* 尝试下一个候选 */ }
+            }
         }
+        if (skipped || sawAlternate) hostToast('自动换源未找到可播放原唱，已跳过翻唱、DJ、伴奏等杂乱版本');
         return null;
     };
 
@@ -339,14 +451,18 @@ export default async function activate(folium) {
     const mergedSearch = async (query, page) => {
         const srcs = enabledSrcs();
         const q = String(query || '').trim().slice(0, 200);
-        if (!q || !srcs.length) return { items: [], hasMore: false };
+        if (!q || !srcs.length) return { items: [], hasMore: false, filteredCount: 0, demotedCount: 0, filterReasons: {} };
         const limit = Math.min(Math.max(1, page.limit || 30), 50);
         const offset = Math.max(0, page.offset || 0);
-        const key = `${q}|${srcs.join(',')}`;
+        const key = `${q}|${srcs.join(',')}|${originalPriorityOn() ? 'orig' : 'all'}`;
         const tokens = tokenize(q);
         let session = searchSessions.get(key);
         if (!session) {
-            session = { items: [], seen: new Set(), perSrc: Object.fromEntries(srcs.map(s => [s, { cursor: undefined, page: 1, done: false }])) };
+            session = {
+                items: [], seen: new Set(), counted: new Set(), stalled: 0,
+                originalHints: new Map(), filteredCount: 0, demotedCount: 0, filterReasons: {},
+                perSrc: Object.fromEntries(srcs.map(s => [s, { cursor: undefined, done: false }])),
+            };
             searchSessions.set(key, session);
             if (searchSessions.size > 20) searchSessions.delete(searchSessions.keys().next().value);
         }
@@ -354,37 +470,55 @@ export default async function activate(folium) {
             const batches = await Promise.all(srcs.filter(s => !session.perSrc[s].done).map(async (s) => {
                 const st = session.perSrc[s];
                 try {
-                    if (PLATFORMS[s].host) {
-                        const r = await folium.omni.searchSongs(q, { providerId: PLATFORMS[s].host, limit, ...(st.cursor ? { cursor: st.cursor } : {}) });
-                        st.cursor = r.nextCursor || undefined;
-                        st.done = !r.nextCursor;
-                        return (r.items || []).filter(x => x.id != null).map(x => toProviderSong(s, x));
-                    }
-                    const r = await folium.rpc.call('platformSearch', { source: s, str: q, page: st.page, limit });
-                    st.page += 1;
-                    st.done = !r.hasMore;
-                    return (r.songs || []).map(x => platformToProviderSong(s, x));
+                    const r = await searchSource(s, q, limit, st.cursor);
+                    st.cursor = r.nextCursor || undefined;
+                    st.done = !r.nextCursor;
+                    return r.items;
                 } catch (e) {
                     folium.log.error(`搜索 ${PLATFORMS[s].label} 失败：${e && e.message}`);
                     st.done = true;
                     return [];
                 }
             }));
+            const batchItems = batches.flat();
+            if (originalPriorityOn()) {
+                for (const song of batchItems) {
+                    const info = variantInfo(song, tokens);
+                    if (info.excluded || info.kind !== 'original' || !isTrustedOriginal(song)) continue;
+                    const titleKey = normText(song.title);
+                    if (!session.originalHints.has(titleKey)) session.originalHints.set(titleKey, new Set());
+                    const hint = session.originalHints.get(titleKey);
+                    for (const artist of songArtists(song)) hint.add(artist);
+                }
+            }
             let added = 0;
-            for (const song of batches.flat()) {
+            for (const song of batchItems) {
+                const info = variantInfo(song, tokens, session.originalHints);
+                if (!session.counted.has(song.id)) {
+                    session.counted.add(song.id);
+                    if (info.excluded) {
+                        session.filteredCount++;
+                        session.filterReasons[info.reason] = (session.filterReasons[info.reason] || 0) + 1;
+                    } else if (info.kind !== 'original') session.demotedCount++;
+                }
+                if (info.excluded) continue;
                 const dk = dedupeKey(song.title, song.artists);
                 if (session.seen.has(dk)) continue;
                 session.seen.add(dk);
                 session.items.push(song);
                 added++;
             }
-            if (tokens.length) session.items.sort((a, b) => songScore(b, tokens) - songScore(a, tokens));
-            if (!added && srcs.every(s => session.perSrc[s].done)) break;
-            if (!added) break;
+            if (tokens.length) session.items.sort((a, b) => (songScore(b, tokens) + originalityScore(b, tokens)) - (songScore(a, tokens) + originalityScore(a, tokens)));
+            session.stalled = added ? 0 : session.stalled + 1;
+            if (session.stalled >= 3) {
+                for (const s of srcs) session.perSrc[s].done = true;
+                break;
+            }
+            if (srcs.every(s => session.perSrc[s].done)) break;
         }
         const items = session.items.slice(offset, offset + limit);
         const hasMore = session.items.length > offset + limit || srcs.some(s => !session.perSrc[s].done);
-        return { items, hasMore };
+        return { items, hasMore, filteredCount: session.filteredCount, demotedCount: session.demotedCount, filterReasons: { ...session.filterReasons } };
     };
 
     const providerDef = {
@@ -494,6 +628,7 @@ export default async function activate(folium) {
             qsKeyword: '热门', feedSongs: [], feedLoading: false,
             query: '', searchItems: [], searchOffset: 0, searchHasMore: false, searching: false,
             searchSrcFilter: [], searchSingerFilter: '',
+            searchFilteredCount: 0, searchDemotedCount: 0, searchFilterReasons: {},
             importText: '', importing: false,
             myLists: [], myMerge: false, mySel: [], merging: false, renamingKey: '', renameText: '', colMyKey: null,
             creatingList: false, newListName: '',
@@ -797,6 +932,7 @@ export default async function activate(folium) {
                 if (!state.col || state.col.id !== item.id) return;
                 state.colSongs = (r.songs || []).map(s => platformToProviderSong(src, s));
                 state.colTotal = r.total || state.colSongs.length;
+                const freshTotal = state.colTotal;
                 const myEntry = state.colMyKey ? state.myLists.find(x => x.key === state.colMyKey) : null;
                 const rem = new Set((myEntry && myEntry.removed) || []);
                 if (rem.size) {
@@ -814,6 +950,11 @@ export default async function activate(folium) {
                 }
                 if (r.name) state.col.name = r.name;
                 if (r.picUrl) state.col.picUrl = r.picUrl;
+                // 写回平台最新总数（不含本地覆盖层，行上计数另算 removed/added），「我的」行歌曲数随打开刷新
+                if (myEntry && (myEntry.total !== freshTotal || myEntry.name !== state.col.name || myEntry.picUrl !== state.col.picUrl)) {
+                    myEntry.total = freshTotal; myEntry.name = state.col.name; myEntry.picUrl = state.col.picUrl;
+                    void folium.rpc.call('saveMyList', { source: src, kind, id: item.id, name: state.col.name, picUrl: state.col.picUrl, total: freshTotal }).catch(() => {});
+                }
                 if (!state.colSongs.length) state.error = '该列表暂无歌曲';
             } catch (e) {
                 state.error = `歌曲加载失败：${e && e.message}`;
@@ -1107,7 +1248,11 @@ export default async function activate(folium) {
         const doSearch = async (reset) => {
             const q = state.query.trim();
             if (!q) return;
-            if (reset) { state.searchItems = []; state.searchOffset = 0; state.searchHasMore = false; state.searchSrcFilter = []; state.searchSingerFilter = ''; }
+            if (reset) {
+                state.searchItems = []; state.searchOffset = 0; state.searchHasMore = false;
+                state.searchSrcFilter = []; state.searchSingerFilter = '';
+                state.searchFilteredCount = 0; state.searchDemotedCount = 0; state.searchFilterReasons = {};
+            }
             state.searching = true; state.error = '';
             render();
             try {
@@ -1115,7 +1260,10 @@ export default async function activate(folium) {
                 state.searchItems = reset ? r.items : state.searchItems.concat(r.items);
                 state.searchOffset += r.items.length;
                 state.searchHasMore = r.hasMore;
-                if (!state.searchItems.length) state.error = '没有搜索到结果';
+                state.searchFilteredCount = r.filteredCount || 0;
+                state.searchDemotedCount = r.demotedCount || 0;
+                state.searchFilterReasons = r.filterReasons || {};
+                if (!state.searchItems.length && !state.searchFilteredCount) state.error = '没有搜索到结果';
             } catch (e) {
                 state.error = `搜索失败：${e && e.message}`;
             }
@@ -1202,6 +1350,16 @@ export default async function activate(folium) {
                 bar.appendChild(input);
                 bar.appendChild(bGo);
                 main.appendChild(bar);
+                if (originalPriorityOn() && (state.searchFilteredCount || state.searchDemotedCount)) {
+                    const notes = [];
+                    if (state.searchFilteredCount) {
+                        const reasons = Object.entries(state.searchFilterReasons || {}).sort((a, b) => b[1] - a[1]).slice(0, 3)
+                            .map(([key, count]) => `${filterReasonLabels[key] || '杂乱版本'} ${count}`).join('、');
+                        notes.push(`已过滤 ${state.searchFilteredCount} 个杂乱版本${reasons ? `（${reasons}）` : ''}`);
+                    }
+                    if (state.searchDemotedCount) notes.push(`${state.searchDemotedCount} 个现场/改编版本已排到后面`);
+                    main.appendChild(el('div', 'lx-note', `${notes.join('；')}。可在「音源 → 偏好设置」关闭原唱优先。`));
+                }
                 const fItems = filteredSearchItems();
                 const toolbar = el('div', 'lx-toolbar');
                 toolbar.appendChild(el('span', 'lx-count', state.searchItems.length
@@ -1252,7 +1410,9 @@ export default async function activate(folium) {
                     main.appendChild(fbar);
                 }
                 const list = songListEl(fItems, state.searching, state.error,
-                    state.searchItems.length ? '没有符合筛选条件的结果' : '输入关键词，同时搜索多个平台；支持「歌名 歌手」组合提高准确度');
+                    state.searchItems.length ? '没有符合筛选条件的结果'
+                        : state.searchFilteredCount ? '原唱优先已过滤全部结果，可到「音源 → 偏好设置」关闭后查看'
+                            : '输入关键词，同时搜索多个平台；支持「歌名 歌手」组合提高准确度');
                 if (state.searchHasMore && state.searchItems.length) {
                     const foot = el('div', 'lx-foot');
                     const more = el('button', 'lx-btn ghost', state.searching ? '加载中…' : '加载更多');
@@ -1405,6 +1565,7 @@ export default async function activate(folium) {
                     row('启用自定义源', '关闭后聚合搜索与播放不再使用自定义音源', toggle('enabled'));
                     row('首选音质', '脚本不支持时自动降档：母带 → Hi-Res → FLAC 24bit → FLAC → 320k → 128k', selOf('quality', QUALITY_OPTIONS));
                     row('播放失败自动换源', '当前平台解析失败时，自动在其他已启用平台搜索同名歌曲重试', toggle('autoSwitch'));
+                    row('原唱优先', '六平台搜索与自动换源统一过滤翻唱、DJ/Remix、伴奏、UGC、片段及歌手不匹配；现场等版本保留但降权', toggle('originalPriority'));
                     for (const s of SRC_ORDER) row(`搜索包含${PLATFORMS[s].label}`, '', toggle(`search${s[0].toUpperCase()}${s.slice(1)}`));
                     main.appendChild(slist);
                 }
@@ -1619,7 +1780,6 @@ export default async function activate(folium) {
         if (listsSync) listsSync(lists);
         return lists;
     };
-    const hostToast = (msg) => { try { folium.ui.toast(msg); } catch { /* 旧宿主无 ui.toast */ } };
     const currentRawSong = async () => {
         try {
             const st = await folium.playback.getState();

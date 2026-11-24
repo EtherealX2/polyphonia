@@ -484,7 +484,15 @@ module.exports = function activate(api) {
                 albumId: albumMid,
                 intervalSec: s.interval || 0,
                 picUrl: albumMid ? `https://y.gtimg.cn/music/photo_new/T002R300x300M000${albumMid}.jpg` : (singerMid ? `https://y.gtimg.cn/music/photo_new/T001R300x300M000${singerMid}.jpg` : ''),
-                meta: { songmid: s.mid || '', strMediaMid: (s.file && s.file.media_mid) || s.mid || '' },
+                meta: {
+                    songmid: s.mid || '',
+                    strMediaMid: (s.file && s.file.media_mid) || s.mid || '',
+                    qqVersion: Number(s.version) || 0,
+                    qqPayPlay: s.pay && s.pay.pay_play != null ? Number(s.pay.pay_play) : null,
+                    qqProtect: Number(s.protect) || 0,
+                    qqName: String(s.name || ''),
+                    qqTitle: String(s.title || ''),
+                },
             };
         });
     };
@@ -568,7 +576,15 @@ module.exports = function activate(api) {
             albumId: albumMid,
             intervalSec: s.interval || 0,
             picUrl: albumMid ? `https://y.gtimg.cn/music/photo_new/T002R300x300M000${albumMid}.jpg` : (singerMid ? `https://y.gtimg.cn/music/photo_new/T001R300x300M000${singerMid}.jpg` : ''),
-            meta: { songmid: s.mid || '', strMediaMid: (s.file && s.file.media_mid) || s.mid || '' },
+            meta: {
+                songmid: s.mid || '',
+                strMediaMid: (s.file && s.file.media_mid) || s.mid || '',
+                qqVersion: Number(s.version) || 0,
+                qqPayPlay: s.pay && s.pay.pay_play != null ? Number(s.pay.pay_play) : null,
+                qqProtect: Number(s.protect) || 0,
+                qqName: String(s.name || ''),
+                qqTitle: String(s.title || ''),
+            },
         };
     };
     // 酷狗歌单/专辑接口只给 "歌手 - 歌名" 拼接串
@@ -895,13 +911,13 @@ module.exports = function activate(api) {
         const rid = String(it.id || String(it.MUSICRID || '').replace('MUSIC_', ''));
         return {
             id: rid,
-            name: htmlUnescape(it.name || it.SONGNAME || ''),
+            name: htmlUnescape(it.name || it.NAME || it.SONGNAME || ''),
             singer: htmlUnescape(String(it.artist || it.ARTIST || '')).replace(/&/g, '、'),
             albumName: htmlUnescape(it.album || it.ALBUM || ''),
             albumId: String(it.albumid || it.ALBUMID || ''),
             intervalSec: parseInt(it.duration || it.DURATION || 0, 10) || 0,
             picUrl: it.albumpic || it.musicPic || it.pic || '',
-            meta: { rid },
+            meta: { rid, kwOriginalSongType: Number(it.originalsongtype) || 0, kwSongName: htmlUnescape(it.SONGNAME || '') },
         };
     };
     const kwPic = async (rid) => {
@@ -994,7 +1010,11 @@ module.exports = function activate(api) {
             albumId: String(it.albumId || ''),
             intervalSec: parseInt(it.duration || 0, 10) || 0,
             picUrl: img.replace(/^http:/, 'https:'),
-            meta: { copyrightId: it.copyrightId || '', lrcUrl: it.lrcUrl || '', mrcUrl: it.mrcurl || '', trcUrl: it.trcUrl || '' },
+            meta: {
+                copyrightId: it.copyrightId || '', lrcUrl: it.lrcUrl || '', mrcUrl: it.mrcurl || '', trcUrl: it.trcUrl || '',
+                mgCopyright: it.copyright != null ? Number(it.copyright) : null,
+                mgCopyrightType: it.copyrightType != null ? Number(it.copyrightType) : null,
+            },
         };
     };
     const mgSearch = async (str, page, limit) => {
@@ -1149,7 +1169,7 @@ module.exports = function activate(api) {
         const rel = (t && t.related_info) || {};
         return {
             id: String(b.id || ''),
-            name: b.name || '',
+            name: [b.name, b.sub_name].filter(Boolean).join(' '),
             singer: (rel.artist_links || []).map(a => a.name).filter(Boolean).join(' / '),
             albumName: (rel.album_link && rel.album_link.name) || '',
             albumId: String((rel.album_link && rel.album_link.id) || ''),
@@ -1223,6 +1243,42 @@ module.exports = function activate(api) {
         return { songs: songs.slice(0, 1000), total: total || songs.length, name, picUrl };
     };
 
+    // QQ 匿名精简版搜索：保留 version/pay/protect，供原唱优先判定；不携带设备指纹或登录态。
+    const QQ_SEARCH_COMM = { ct: 11, cv: '1003006', v: '1003006', tmeAppID: 'qqmusiclight', nettype: 'NETWORK_WIFI', udid: '0', uid: '0' };
+    const qqSearchId = () => `${Math.floor(Math.random() * 9 + 1)}${Array.from({ length: 17 }, () => Math.floor(Math.random() * 10)).join('')}`;
+    const qqSearch = async (str, page, limit) => {
+        const q = String(str || '').trim().slice(0, 60);
+        if (!q) throw new Error('关键词为空');
+        const p = Math.max(1, Number(page) || 1);
+        const l = Math.min(Math.max(1, Number(limit) || 10), 20);
+        const body = {
+            comm: QQ_SEARCH_COMM,
+            request: {
+                module: 'music.search.SearchCgiService',
+                method: 'DoSearchForQQMusicLite',
+                param: {
+                    search_id: qqSearchId(), remoteplace: 'search.android.keyboard', query: q,
+                    search_type: 7, num_per_page: l, page_num: p, highlight: 0,
+                    nqc_flag: 0, page_id: 1, grp: 1,
+                },
+            },
+        };
+        const d = await chartJson('https://u.y.qq.com/cgi-bin/musicu.fcg', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Cookie: 'tmeLoginType=-1', 'User-Agent': 'okhttp/3.14.9', Referer: 'https://y.qq.com/' },
+            body: JSON.stringify(body),
+        });
+        const data = d && d.request && d.request.data;
+        const list = data && data.body && data.body.item_song;
+        if (!data || data.code !== 0 || !Array.isArray(list)) throw new Error('QQ搜索返回异常');
+        const meta = data.meta || {};
+        return {
+            songs: list.map(mapTxSong).filter(s => s.id),
+            total: Number(meta.sum) || 0,
+            hasMore: Number(meta.nextpage) > 0,
+        };
+    };
+
     // 歌单/专辑链接导入
     const resolveShareLink = async (url) => {
         let current = url;
@@ -1277,7 +1333,7 @@ module.exports = function activate(api) {
         if (!q) throw new Error('关键词为空');
         const p = Math.max(1, Number(page) || 1);
         const l = Math.min(Math.max(1, Number(limit) || 30), 50);
-        const r = source === 'kw' ? await kwSearch(q, p, l) : source === 'mg' ? await mgSearch(q, p, l) : source === 'qs' ? await qsSearch(q, p) : null;
+        const r = source === 'tx' ? await qqSearch(q, p, l) : source === 'kw' ? await kwSearch(q, p, l) : source === 'mg' ? await mgSearch(q, p, l) : source === 'qs' ? await qsSearch(q, p) : null;
         if (!r) throw new Error(`不支持的搜索平台 ${source}`);
         debug('platformSearch', source, q, p, r.songs.length);
         return r;
